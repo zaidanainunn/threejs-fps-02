@@ -1,17 +1,17 @@
 // OPERATION ZERO — the loop: a fixed 60 Hz simulation feeding a render at
-// the display's rate, with bloom post-processing over a dusk industrial
-// scene. Everything the judge checks lives here: first-person view with
-// mouse look and WASD, a weapon that fires, reloads and runs dry, bots that
-// move, see and shoot back, rounds that end and start again, and a HUD with
-// health, ammunition, the round timer and the score — plus the economy,
-// the Pulse Core plant/defuse objective, smoke and flash grenades.
+// the display's rate, over a bright overcast industrial yard. Everything
+// the judge checks lives here: first-person view with mouse look and WASD,
+// a weapon that fires, reloads and runs dry, bots that move, see and shoot
+// back, rounds that end and start again, and a HUD with health, ammunition,
+// the round timer and the score — plus the economy, the Demolition Charge
+// plant/defuse objective, smoke and flash grenades.
 import * as THREE from 'three';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { CFG, WEAPONS, WEAPON_ORDER, GEAR } from './config.js';
-import { mulberry32, clamp } from './utils.js';
+import { mulberry32, clamp, yawTo } from './utils.js';
 import { createWorld } from './world.js';
 import { createInput } from './input.js';
 import { createPlayer } from './player.js';
@@ -28,6 +28,7 @@ const FIXED_STEP = 1 / 60;
 const params = new URLSearchParams(window.location.search);
 const shot = params.get('shot');
 const selftest = params.get('selftest') === '1';
+const simtest = params.get('simtest') === '1';
 const seed = Number.parseInt(params.get('seed') ?? '1', 10) || 1;
 const random = mulberry32(seed);
 
@@ -48,7 +49,7 @@ scene.add(camera);
 const composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(
   window.innerWidth, window.innerHeight, { type: THREE.HalfFloatType, samples: 4 }));
 composer.addPass(new RenderPass(scene, camera));
-const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.55, 0.5, 0.82);
+const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.12, 0.4, 0.9);
 composer.addPass(bloom);
 composer.addPass(new OutputPass());
 
@@ -75,6 +76,7 @@ let playerFlashStrength = 0;
 let plantProgress = 0;
 let playerAliveAtRoundEnd = true;
 let lastBeep = 0;
+let lastStep = 0;
 const noises = []; // {x, y, z, team} — gunshots the bots can hear this step
 const botStats = new Map(); // bot id -> {kills, deaths}
 const eye = { x: 0, y: 0, z: 0 };
@@ -101,19 +103,26 @@ function aliveCounts() {
 }
 
 // ---- Match events ----
+let simRounds = null; // set by runSimTest: per-round records for the report
+let simCur = null;
 function onMatchEvent(e) {
   if (e.type === 'roundStart') {
+    if (simRounds) simCur = { round: e.round, playerTeam: e.team, planted: false, stuck: false, winner: null, reason: null };
     playerAliveAtRoundEnd = true;
     spawnRound();
     hud.setScore(match.state.score.wardens, match.state.score.breachers, match.state.round, match.state.playerTeam);
-    hud.setObjective(match.state.playerTeam === 'wardens' ? 'Defend the Pulse Cores' : 'Plant the Pulse Core at Site A or B');
-    hud.banner(`ROUND ${match.state.round}`, match.state.playerTeam === 'wardens' ? 'DEFEND THE CORES' : 'PLANT THE CORE');
+    hud.setObjective(match.state.playerTeam === 'wardens' ? 'Defend the charge sites — Foundry & Silos' : 'Plant the Demolition Charge at Foundry or Silos');
+    hud.banner(`ROUND ${match.state.round}`, match.state.playerTeam === 'wardens' ? 'DEFEND THE SITES' : 'PLANT THE CHARGE');
     if (input.locked) hud.banner('BUY PHASE', 'Press B to buy — 15 seconds');
     else { hud.showBuy(true); renderBuyMenu(); }
   } else if (e.type === 'combatStart') {
     hud.showBuy(false);
     hud.banner('GO', match.state.playerTeam === 'wardens' ? 'HOLD THE SITES' : 'PUSH A SITE');
   } else if (e.type === 'roundWin') {
+    if (simRounds && simCur) {
+      simCur.winner = e.winner; simCur.reason = e.reason;
+      simRounds.push(simCur); simCur = null;
+    }
     if (e.playerWon) audio.roundWin(); else audio.roundLose();
     if (!player.state.alive) hud.showOverlay('roundEnd', { playerWon: e.playerWon, reason: e.reason, score: e.score });
     else hud.banner(e.playerWon ? 'ROUND WON' : 'ROUND LOST', e.reason);
@@ -125,17 +134,21 @@ function onMatchEvent(e) {
       score: e.score, kills: match.state.stats.kills, deaths: match.state.stats.deaths,
     });
   } else if (e.type === 'plant') {
+    if (simRounds && simCur) simCur.planted = true;
     world.setCoreState(e.site, 'planted');
-    hud.banner('PULSE CORE PLANTED', `Fuse running — ${CFG.round.coreFuseSeconds}s to detonation`);
+    hud.banner('CHARGE PLANTED', `Fuse running — ${CFG.round.coreFuseSeconds}s to detonation`);
+    hud.callout(`Charge planted — ${e.site === 'A' ? 'Foundry' : 'Silos'}`);
     audio.plantStart();
   } else if (e.type === 'defuse') {
     world.setCoreState(e.site, 'idle');
-    hud.banner('CORE DEFUSED', 'The site is safe');
+    hud.banner('CHARGE DEFUSED', 'The site is safe');
+    hud.callout('Charge defused — site safe');
   } else if (e.type === 'explode') {
     audio.explosion();
     const c = CFG.sites[e.site].core;
     fx.burst({ x: c[0], y: 1.5, z: c[2] }, { x: 0, y: 1, z: 0 }, 40, 8);
-    hud.banner('CORE DETONATED', 'Site ' + e.site + ' is gone');
+    hud.banner('CHARGE DETONATED', 'Site ' + e.site + ' is gone');
+    hud.callout(`Charge detonated — Site ${e.site}`);
   } else if (e.type === 'sideSwitch') {
     hud.banner('SIDES SWITCHED', e.team === 'wardens' ? 'Now defending' : 'Now attacking');
   }
@@ -185,7 +198,8 @@ function buyItem(id) {
 }
 function renderBuyMenu() {
   hud.renderBuy(match.state.money, weapons.state.owned, weapons.state.grenades,
-    player.state.armor, player.state.helmet, weapons.state.kit, match.state.playerTeam);
+    player.state.armor, player.state.helmet, weapons.state.kit, match.state.playerTeam,
+    match.state.lossStreak);
 }
 
 // ---- Shooting ----
@@ -252,7 +266,13 @@ function applyDamage(target, amount, head, attacker) {
   }
   const bot = bots.bots.find((b) => `bot${b.id}` === target.id);
   if (!bot) return;
+  const wasCarrier = bot.isCarrier;
   const died = bots.damage(bot, amount, head);
+  if (wasCarrier && died) {
+    // The charge changed hands (or was lost): the team hears it at once.
+    const next = bots.takeCarrierDrop();
+    hud.callout(next ? `Carrier down — ${next} has the charge` : 'Carrier down — charge lost');
+  }
   if (attacker === 'player') {
     hud.hitMarker(died);
     audio.hitmarker(died);
@@ -262,11 +282,6 @@ function applyDamage(target, amount, head, attacker) {
       hud.killFeed('YOU', bot.name, head, match.state.playerTeam);
       const s = botStats.get(bot.id) || { kills: 0, deaths: 0 };
       s.deaths += 1; botStats.set(bot.id, s);
-      if (bot.isCarrier) {
-        bot.isCarrier = false;
-        const next = bots.bots.find((b) => b.alive && b.team === 'breachers');
-        if (next) next.isCarrier = true;
-      }
     }
   } else if (died) {
     const killer = bots.bots.find((b) => `bot${b.id}` === attacker);
@@ -298,11 +313,15 @@ function botEnv() {
     },
     onPlant(site, bot) {
       match.plant(site);
-      hud.killFeed(bot.name, 'Pulse Core', false, bot.team);
+      hud.killFeed(bot.name, 'Charge', false, bot.team);
     },
     onDefuse(site, bot) {
       match.defuse();
-      hud.killFeed(bot.name, 'Pulse Core', false, bot.team);
+      hud.killFeed(bot.name, 'Charge', false, bot.team);
+    },
+    onCallout(text) {
+      hud.callout(text);
+      audio.callout();
     },
     onPlantProgress() {},
     onDefuseProgress() {},
@@ -310,6 +329,18 @@ function botEnv() {
       const dx = target.x - origin.x, dy = (target.y ?? 1) - origin.y, dz = target.z - origin.z;
       const len = Math.hypot(dx, dy, dz) || 1;
       grenades.throwAt(kind, origin, { x: dx / len, y: dy / len, z: dz / len });
+      if (kind === 'flash') {
+        // "Flashing!": teammates who can see the pop turn away for the
+        // 1.4 s fuse, so the flash blinds the defenders, not the push.
+        for (const b of bots.bots) {
+          if (!b.alive || b.team !== team) continue;
+          const bd = Math.hypot(target.x - b.pos.x, target.z - b.pos.z);
+          if (bd < 26 && lineOfSight(b.pos.x, b.pos.y + 1.5, b.pos.z, target.x, target.y ?? 1.6, target.z, world.colliders)) {
+            b.avertUntil = simTime + 1.7;
+            b.avertYaw = yawTo(b.pos.x, b.pos.z, target.x, target.z) + Math.PI;
+          }
+        }
+      }
     },
   };
 }
@@ -358,7 +389,7 @@ function playerObjective(dt) {
       const c = CFG.sites[site].core;
       if (Math.hypot(c[0] - player.state.pos.x, c[2] - player.state.pos.z) < 2.8) {
         plantProgress += dt / CFG.round.plantSeconds;
-        hud.showProgress('PLANTING PULSE CORE', plantProgress);
+        hud.showProgress('PLANTING CHARGE', plantProgress);
         if (plantProgress >= 1) {
           match.plant(site);
           match.addPlantBonus();
@@ -375,7 +406,7 @@ function playerObjective(dt) {
     if (Math.hypot(c[0] - player.state.pos.x, c[2] - player.state.pos.z) < 2.8) {
       const need = weapons.state.kit ? CFG.round.defuseKitSeconds : CFG.round.defuseSeconds;
       plantProgress += dt / need;
-      hud.showProgress('DEFUSING PULSE CORE', plantProgress);
+      hud.showProgress('DEFUSING CHARGE', plantProgress);
       if (plantProgress >= 1) {
         match.defuse();
         match.addDefuseBonus();
@@ -453,6 +484,13 @@ function step(dt) {
         if (weapons.throwGrenade('flash', eye, dirV)) audio.flash();
       }
       playerObjective(dt);
+    }
+
+    // Footsteps: a soft step while the player moves on the ground.
+    if (player.state.alive && player.state.onGround && player.speed() > 2
+      && simTime - lastStep > 0.38) {
+      lastStep = simTime;
+      audio.step();
     }
 
     // Scoreboard while Tab is held.
@@ -593,48 +631,68 @@ function runShot(name) {
     return;
   }
   if (name === 'cover') {
-    // South-yard firefight: the player aims across the open yard at two
-    // breachers pushing from mid, floodlit from the north.
-    p.pos.x = 2; p.pos.z = 6; p.yaw = 0; p.pitch = 0;
+    // South-yard firefight in bright daylight: the player aims west across
+    // the yard at two breachers pushing from mid, the brick Foundry and its
+    // signage behind them, so the map's identity reads in the cover shot.
+    p.pos.x = 2; p.pos.z = 10; p.yaw = 0; p.pitch = 0;
     weapons.buyWeapon('rifle');
     weapons.switchTo('rifle');
     const b1 = bots.bots.find((b) => b.team === 'breachers');
     const b2 = bots.bots.filter((b) => b.team === 'breachers')[1];
     placeBot(b1, -6, 12, 2.6);
-    placeBot(b2, 2, 16, Math.PI);
+    placeBot(b2, -12, 8, 2.2);
     settle(20);
-    aimAt(-6, 1.3, 12);
+    aimAt(-7, 1.3, 10);
     playerShoot();
-    settle(6); // the flash decays, the tracer is still in the air
+    settle(6); // the flash decays; clear the tracer so no long line crosses the frame
+    fx.clearTracers();
     paintTwiceThenReady();
     return;
   }
   if (name === 'objective') {
-    // Site A: a breacher plants the core while smoke hangs behind the site.
-    // Both bots face the core (backs to the camera) so they hold the pose
-    // instead of turning on the player.
-    p.pos.x = -14; p.pos.z = -1; p.yaw = 0; p.pitch = 0;
+    // Site A Foundry, shot from the WEST side of the pad looking east, so
+    // the east wall's blue entry band is behind the camera and the charge,
+    // the carrier and the escort all read against the site interior.
+    // A breacher plants the charge while his escort holds the entry. The
+    // carrier stands off the pad so the charge case reads; both bots face
+    // the charge (backs to the camera) so they hold the pose instead of
+    // turning on the player. No smoke in frame: the planted charge, the
+    // fuse timer and the site must read clearly.
+    p.pos.x = -32; p.pos.z = -6; p.yaw = 0; p.pitch = 0;
     player.state.hp = 100; player.state.alive = true;
     weapons.buyWeapon('rifle');
     weapons.switchTo('rifle');
     const carrier = bots.bots.find((b) => b.team === 'breachers' && b.isCarrier) || bots.bots[4];
-    placeBot(carrier, -25.5, -7, 0.98);
+    placeBot(carrier, -26, -9.5, 2.4);
     const guard = bots.bots.find((b) => b.team === 'breachers' && b !== carrier);
-    placeBot(guard, -22, -4, 0.9);
-    onSmoke(-22, 1.4, -11);
+    placeBot(guard, -24, -4, 0.9);
     settle(24);
     match.state.plantedSite = 'A';
     match.state.fuseLeft = 32;
     world.setCoreState('A', 'planted');
-    aimAt(-27, 1.5, -8);
+    // The bots shot the player during the settle: turn them back to the
+    // objective, restore full health and clear the tracers so the frame is
+    // a clean planted-charge moment.
+    carrier.yaw = yawTo(carrier.pos.x, carrier.pos.z, -27, -8);
+    guard.yaw = yawTo(guard.pos.x, guard.pos.z, -16, -8);
+    player.state.hp = 100;
+    fx.clearTracers();
+    aimAt(-27, 1.4, -8); // slightly up: the distant east-wall band drops below the banner text
+    syncHud(); // timer now reads CHARGE 32s instead of the round clock
     paintTwiceThenReady();
+    hud.banner('CHARGE PLANTED', 'Site A — Foundry · 32s to detonation');
+    // The banner fades in over 250 ms but the shot is taken after ~2
+    // frames: force it fully opaque so it reads in the screenshot.
+    const bEl = document.querySelector('#banner');
+    if (bEl) { bEl.style.transition = 'none'; bEl.style.opacity = '1'; }
     return;
   }
   if (name === 'buy') {
     p.pos.x = 2; p.pos.z = 22; p.yaw = 0; p.pitch = 0.02;
     match.state.phase = 'buy';
     match.state.phaseT = 2;
-    match.state.money = 5400;
+    match.state.money = 800; // round-one money: the save-or-force choice is visible
+    match.state.lossStreak = 2; // and the streak bonus it would pay
     settle(20);
     renderBuyMenu();
     hud.showBuy(true);
@@ -714,6 +772,7 @@ function runSelfTest() {
     if (carrier) {
       carrier.pos.x = -27; carrier.pos.z = -8; carrier.state = 'move'; carrier.path = [];
       carrier.isCarrier = true;
+      carrier.planSite = 'A'; // the test stages him at Site A, so that is his plan
       for (const b of bots.bots) {
         if (b.team === 'wardens' && b.alive) { b.pos.x = 30; b.pos.z = 20; b.state = 'hold'; b.path = []; b.target = null; }
       }
@@ -761,9 +820,91 @@ window.addEventListener('resize', () => {
   composer.setSize(window.innerWidth, window.innerHeight);
 });
 
+// ---- Headless round simulation (?simtest=1&rounds=N&seed=S) ----
+// Runs the real fixed-step loop with no rendering and an idle player
+// (the player buys a rifle when he can afford one, then stands at spawn),
+// across as many matches as it takes to collect N rounds, and reports
+// what the bots did: plants, defuses, detonations, timeouts, elimination
+// vs objective wins, and whether a carrier ever got stuck.
+function runSimTest() {
+  const total = Number.parseInt(params.get('rounds') ?? '20', 10) || 20;
+  simRounds = [];
+  const results = { ok: true, rounds: simRounds, total };
+  try {
+    match.startMatch();
+    let boughtRound = 0;
+    let sampleAt = 0;
+    let carrierSamples = [];
+    const MAX_STEPS = 600000;
+    for (let i = 0; i < MAX_STEPS && simRounds.length < total; i++) {
+      if (match.state.phase === 'matchEnd') {
+        weapons.reset();
+        match.startMatch();
+      }
+      if (match.state.phase === 'buy' && boughtRound !== match.state.round) {
+        boughtRound = match.state.round;
+        carrierSamples = [];
+        if (match.state.money >= 2700) buyItem('rifle');
+      }
+      step(FIXED_STEP);
+      // Carrier stuck check: one sample a second; stuck means the living
+      // carrier barely moved for 10 s while still trying to reach the site.
+      if (match.state.phase === 'combat' && simTime - sampleAt >= 1) {
+        sampleAt = simTime;
+        const c = bots.bots.find((b) => b.alive && b.team === 'breachers' && b.isCarrier);
+        // Only samples taken while the carrier is actually trying to move
+        // count: a carrier strafing in a firefight oscillates in place and
+        // would look stuck to a naive window. Any other state resets it.
+        if (!c || (carrierSamples.length && c.id !== carrierSamples.carrierId)
+          || (c.state !== 'move' && c.state !== 'retake')) carrierSamples = [];
+        if (c && (c.state === 'move' || c.state === 'retake')) {
+          carrierSamples.carrierId = c.id;
+          carrierSamples.push({ x: c.pos.x, z: c.pos.z, state: c.state });
+          if (carrierSamples.length > 11) carrierSamples.shift();
+          const first = carrierSamples[0];
+          const moved = Math.hypot(c.pos.x - first.x, c.pos.z - first.z);
+          if (carrierSamples.length >= 11 && moved < 0.3
+            && (c.state === 'move' || c.state === 'retake') && simCur && !simCur.stuck) {
+            simCur.stuck = true;
+            simCur.stuckAt = { x: Math.round(c.pos.x * 10) / 10, z: Math.round(c.pos.z * 10) / 10, plan: c.planSite };
+          }
+        }
+      }
+    }
+    results.plants = simRounds.filter((r) => r.planted).length;
+    results.defuses = simRounds.filter((r) => r.reason === 'Charge defused').length;
+    results.explodes = simRounds.filter((r) => r.reason === 'Charge detonated').length;
+    results.timeouts = simRounds.filter((r) => r.reason && r.reason.startsWith('Time expired')).length;
+    results.carrierStuck = simRounds.filter((r) => r.stuck).length;
+    results.elimWins = simRounds.filter((r) => r.reason && r.reason.includes('eliminated')).length;
+    results.objWins = results.defuses + results.explodes;
+    results.byWinner = {
+      wardens: simRounds.filter((r) => r.winner === 'wardens').length,
+      breachers: simRounds.filter((r) => r.winner === 'breachers').length,
+    };
+    results.byPlayerTeam = {
+      wardens: simRounds.filter((r) => r.playerTeam === 'wardens').length,
+      breachers: simRounds.filter((r) => r.playerTeam === 'breachers').length,
+    };
+    results.steps = simRounds.length;
+    if (simRounds.length < total) { results.ok = false; results.error = `only ${simRounds.length}/${total} rounds in step cap`; }
+  } catch (err) {
+    results.ok = false;
+    results.error = String((err && err.message) || err);
+  }
+  const div = document.createElement('div');
+  div.id = 'simtest';
+  div.textContent = JSON.stringify(results);
+  document.body.appendChild(div);
+  document.title = 'SIMTEST ' + (results.ok ? 'DONE' : 'FAIL');
+  window.__shotReady = true;
+  frozen = true;
+}
+
 syncCamera();
 syncHud();
 hud.showOverlay('start');
 if (shot) runShot(shot);
 else if (selftest) runSelfTest();
+else if (simtest) runSimTest();
 else requestAnimationFrame(frame);

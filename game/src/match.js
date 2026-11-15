@@ -1,5 +1,5 @@
 // The match: buy phase, combat, round end and match end; the economy,
-// the Pulse Core plant/defuse objective, side switching and every win
+// the Demolition Charge plant/defuse objective, side switching and every win
 // condition. It owns no rendering — it emits events the HUD and audio read.
 import { CFG } from './config.js';
 
@@ -16,6 +16,7 @@ export function createMatch(onEvent) {
     fuseLeft: 0,
     winner: null,
     winReason: '',
+    lossStreak: 0, // consecutive rounds the player's team has lost
     stats: { kills: 0, deaths: 0, plants: 0, defuses: 0 },
   };
 
@@ -27,6 +28,7 @@ export function createMatch(onEvent) {
     state.playerTeam = 'wardens';
     state.money = CFG.money.start;
     state.winner = null; state.winReason = '';
+    state.lossStreak = 0;
     state.stats.kills = 0; state.stats.deaths = 0; state.stats.plants = 0; state.stats.defuses = 0;
     state.plantedSite = null;
     startRound();
@@ -51,7 +53,16 @@ export function createMatch(onEvent) {
     state.score[winner] += 1;
     const loser = winner === 'wardens' ? 'breachers' : 'wardens';
     const playerWon = winner === state.playerTeam;
-    state.money = Math.min(CFG.money.max, state.money + (playerWon ? CFG.money.win : CFG.money.loss));
+    // Losing pays more the longer the streak runs (1900/2400/2900/3400),
+    // so saving for a full buy is a real choice against forcing one.
+    if (playerWon) {
+      state.lossStreak = 0;
+      state.money = Math.min(CFG.money.max, state.money + CFG.money.win);
+    } else {
+      state.lossStreak += 1;
+      const streakPay = CFG.money.lossStreak[Math.min(state.lossStreak, CFG.money.lossStreak.length) - 1];
+      state.money = Math.min(CFG.money.max, state.money + streakPay);
+    }
     state.phase = 'roundEnd';
     state.phaseT = 0;
     state.winReason = reason;
@@ -76,7 +87,7 @@ export function createMatch(onEvent) {
     const site = state.plantedSite;
     state.plantedSite = null;
     emit('defuse', { site });
-    awardRound('wardens', 'Pulse Core defused');
+    awardRound('wardens', 'Charge defused');
     return true;
   }
 
@@ -84,7 +95,7 @@ export function createMatch(onEvent) {
     const site = state.plantedSite;
     state.plantedSite = null;
     emit('explode', { site });
-    awardRound('breachers', 'Pulse Core detonated');
+    awardRound('breachers', 'Charge detonated');
   }
 
   // Called every fixed step. Returns nothing; round flow is event-driven.
@@ -108,7 +119,7 @@ export function createMatch(onEvent) {
       }
       state.roundTimeLeft -= dt;
       if (state.roundTimeLeft <= 0) {
-        awardRound('wardens', 'Time expired — cores held');
+        awardRound('wardens', 'Time expired — sites held');
         return;
       }
       if (alive.breachers === 0) { awardRound('wardens', 'Breachers eliminated'); return; }

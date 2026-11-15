@@ -3,6 +3,10 @@
 // (cone + line of sight, smoke blocks it), hearing (gunshots) and memory
 // of a last-seen position. They shoot with the same hitscan resolver the
 // player uses, so a bot's kill is a real ray, not a dice roll.
+// Objective discipline: one breacher carries the Demolition Charge and
+// commits to the site (he only stops to fight up close), one escorts him,
+// the rest open the lane; after a plant the breachers hold the site and
+// the wardens retake, the closest warden defusing while the rest cover.
 import * as THREE from 'three';
 import { BOT, WEAPONS, CFG } from './config.js';
 import { clamp, angleDiff, yawTo, mulberry32 } from './utils.js';
@@ -62,12 +66,16 @@ export function createBots(scene, world, fx) {
   function buildBot(id, team) {
     const color = CFG.teams[team].color;
     const g = new THREE.Group();
-    // Hi-vis torso: a little team-coloured emissive so bots read in shadow.
-    const torsoMat = new THREE.MeshStandardMaterial({ color, roughness: 0.7, metalness: 0.2, emissive: color, emissiveIntensity: 0.35 });
+    // Matte kit: dark fatigues, a small team-coloured shoulder patch for
+    // identification only — no glowing torso, no lit visor in daylight.
+    const torsoMat = new THREE.MeshStandardMaterial({ color: 0x3a3f38, roughness: 0.85, metalness: 0.1 });
+    const patchMat = new THREE.MeshStandardMaterial({ color, roughness: 0.7, metalness: 0.1 });
     const darkMat = new THREE.MeshStandardMaterial({ color: 0x22242a, roughness: 0.8, metalness: 0.3 });
-    const visorMat = new THREE.MeshStandardMaterial({ color: 0x111111, emissive: color, emissiveIntensity: 1.6 });
+    const visorMat = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.25, metalness: 0.6 });
     const torso = new THREE.Mesh(new THREE.BoxGeometry(0.52, 0.62, 0.3), torsoMat);
     torso.position.y = 1.02; torso.castShadow = true; g.add(torso);
+    const patch = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.12, 0.04), patchMat);
+    patch.position.set(-0.12, 1.18, 0.17); g.add(patch);
     const head = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.3, 0.3), darkMat);
     head.position.y = 1.56; head.castShadow = true; g.add(head);
     const visor = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.07, 0.05), visorMat);
@@ -79,21 +87,23 @@ export function createBots(scene, world, fx) {
     const gun = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.1, 0.62), darkMat);
     gun.position.set(0.2, 1.12, -0.3); g.add(gun);
     const disc = new THREE.Mesh(new THREE.CircleGeometry(0.55, 20),
-      new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.55, depthWrite: false }));
+      new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.22, depthWrite: false }));
     disc.rotation.x = -Math.PI / 2; disc.position.y = 0.03; g.add(disc);
     scene.add(g);
     return {
       id, team, name: NAMES[team][id % 5],
-      group: g, torsoMat, visorMat, disc, legL, legR,
+      group: g, torsoMat, patchMat, visorMat, disc, legL, legR,
       pos: { x: 0, y: 0, z: 0 }, vel: { x: 0, y: 0, z: 0 },
       yaw: 0, hp: 100, armor: 0, alive: true,
       weapon: WEAPONS.rifle, state: 'move', path: [], pathI: 0,
       target: null, lastSeen: null, lastSeenAt: -99, reactAt: 0,
       burstLeft: 0, nextShot: 0, burstPauseUntil: 0,
-      holdSpot: null, planSite: 'A', isCarrier: false,
+      holdSpot: null, planSite: 'A', isCarrier: false, isEscort: false,
       blindUntil: 0, thinkAt: 0, strafeDir: 1, strafeUntil: 0,
-      smokeThrown: false, flashThrown: false, plantT: 0, defuseT: 0,
-      walkPhase: Math.random() * 6,
+      smokeThrown: false, flashThrown: false, flashReadyAt: 0, plantT: 0, defuseT: 0,
+      walkPhase: Math.random() * 6, planAnnounced: false, postPlantSpot: null, hasLoadout: false,
+      lastNodeDist: 1e9, stuckSince: 0, detourUntil: 0, detourDir: 1,
+      avertUntil: 0, avertYaw: 0, // turned away from a teammate's flash
     };
   }
 
@@ -116,14 +126,23 @@ export function createBots(scene, world, fx) {
       b.pos.x = s[0] + (random() - 0.5) * 1.2;
       b.pos.y = 0; b.pos.z = s[1] + (random() - 0.5) * 1.2;
       b.yaw = b.team === 'wardens' ? 0 : Math.PI; // wardens face north, breachers south
-      b.hp = 100; b.armor = random() < 0.5 ? 50 : 0; b.alive = true;
+      // A bot who survived the last round keeps his weapon and armour;
+      // a dead bot re-buys. The team buys as a team: one sniper per side,
+      // the rest rifles with an SMG for the entry and the escort.
+      const survived = b.alive;
+      b.hp = 100; b.alive = true;
+      if (!survived) b.armor = random() < 0.5 ? 50 : 0;
       b.state = 'move'; b.path = []; b.pathI = 0; b.target = null;
       b.lastSeen = null; b.burstLeft = 0; b.blindUntil = 0;
-      b.smokeThrown = false; b.flashThrown = false; b.plantT = 0; b.defuseT = 0;
-      b.isCarrier = false; b.holdSpot = null;
-      // Loadout: mostly rifles, one sniper per side, a couple of SMGs.
-      const roll = random();
-      b.weapon = roll < 0.15 ? WEAPONS.sniper : roll < 0.35 ? WEAPONS.smg : WEAPONS.rifle;
+      b.smokeThrown = false; b.flashThrown = false; b.flashReadyAt = 0;
+      b.plantT = 0; b.defuseT = 0;
+      b.isCarrier = false; b.isEscort = false; b.holdSpot = null;
+      b.planAnnounced = false; b.postPlantSpot = null;
+      if (!survived || !b.hasLoadout) {
+        const slot = b.id % 5; // 0 carrier-side, 1 escort, 2 entry, 3 sniper, 4 rifle
+        b.weapon = slot === 3 ? WEAPONS.sniper : slot === 1 || slot === 2 ? WEAPONS.smg : WEAPONS.rifle;
+        b.hasLoadout = true;
+      }
       // Breachers pick a site to hit; Wardens take a hold spot.
       if (b.team === 'breachers') {
         b.planSite = random() < 0.55 ? 'A' : 'B';
@@ -134,14 +153,25 @@ export function createBots(scene, world, fx) {
       b.group.rotation.set(0, 0, 0);
       b.group.position.set(b.pos.x, 0, b.pos.z);
       b.disc.visible = true;
-      b.torsoMat.emissive.setHex(CFG.teams[b.team].color);
-      b.torsoMat.color.setHex(CFG.teams[b.team].color);
-      b.visorMat.emissive.setHex(CFG.teams[b.team].color);
+      b.patchMat.color.setHex(CFG.teams[b.team].color);
       b.disc.material.color.setHex(CFG.teams[b.team].color);
     }
-    // One breacher carries the Pulse Core charge.
-    const carriers = bots.filter((b) => b.team === 'breachers' && b.alive);
-    if (carriers.length) carriers[Math.floor(random() * carriers.length)].isCarrier = true;
+    // One breacher carries the Demolition Charge, one escorts him. The
+    // whole push follows one site plan for the round.
+    const attackers = bots.filter((b) => b.team === 'breachers' && b.alive);
+    if (attackers.length) {
+      const site = random() < 0.55 ? 'A' : 'B';
+      for (const b of attackers) b.planSite = site;
+      const carrier = attackers[Math.floor(random() * attackers.length)];
+      carrier.isCarrier = true;
+      carrier.weapon = WEAPONS.rifle; // the carrier fights at rifle range
+      const escorts = attackers.filter((b) => b !== carrier);
+      if (escorts.length) {
+        const escort = escorts[Math.floor(random() * escorts.length)];
+        escort.isEscort = true;
+        escort.weapon = WEAPONS.smg;
+      }
+    }
   }
 
   function pathTo(b, x, z) {
@@ -151,13 +181,28 @@ export function createBots(scene, world, fx) {
     b.path = p; b.pathI = 0;
   }
 
-  function moveAlongPath(b, dt, speed) {
+  function moveAlongPath(b, dt, speed, now) {
     if (b.pathI >= b.path.length) return true;
     const node = wp[b.path[b.pathI]];
     const dx = node[0] - b.pos.x, dz = node[1] - b.pos.z;
     const dist = Math.hypot(dx, dz);
-    if (dist < 1.0) { b.pathI += 1; return b.pathI >= b.path.length; }
-    const vx = (dx / dist) * speed, vz = (dz / dist) * speed;
+    if (dist < 1.0) { b.pathI += 1; b.lastNodeDist = 1e9; b.stuckSince = 0; return b.pathI >= b.path.length; }
+    // Stuck recovery: the capsule slide can pin a bot head-on against a
+    // small post, so if we have not closed on the node for 1.5 s, sidestep
+    // perpendicular to the lane for a second to slide around the blocker.
+    if (dist < b.lastNodeDist - 0.05) { b.lastNodeDist = dist; b.stuckSince = now; }
+    else if (now - b.stuckSince > 1.5 && now >= b.detourUntil) {
+      b.detourUntil = now + 1.0;
+      b.detourDir = Math.random() < 0.5 ? -1 : 1;
+      b.lastNodeDist = 1e9; b.stuckSince = now;
+    }
+    let vx, vz;
+    if (now < b.detourUntil) {
+      vx = (-dz / dist) * speed * b.detourDir;
+      vz = (dx / dist) * speed * b.detourDir;
+    } else {
+      vx = (dx / dist) * speed; vz = (dz / dist) * speed;
+    }
     b.yaw = yawTo(b.pos.x, b.pos.z, node[0], node[1]);
     moveCapsule(b.pos, vx * dt, vz * dt, 0.34, 1.75, boxes);
     b.walkPhase += dt * 9;
@@ -218,11 +263,21 @@ export function createBots(scene, world, fx) {
             if (d < bestD && canSee(b, e, smoke)) { best = e; bestD = d; }
           }
           if (best) {
-            if (!b.target) b.reactAt = now + BOT.reactMin + Math.random() * (BOT.reactMax - BOT.reactMin);
-            b.target = best;
-            b.lastSeen = { x: best.pos.x, z: best.pos.z };
-            b.lastSeenAt = now;
-            if (b.state !== 'engage') b.state = 'engage';
+            // The carrier commits to the objective: he only stops to fight
+            // an enemy close enough to block the plant; farther contacts
+            // are noted, not chased.
+            const carrierFar = b.isCarrier && bestD > BOT.carrierEngageRange
+              && (b.state === 'move' || b.state === 'plant');
+            if (!carrierFar) {
+              if (!b.target) b.reactAt = now + BOT.reactMin + Math.random() * (BOT.reactMax - BOT.reactMin);
+              b.target = best;
+              b.lastSeen = { x: best.pos.x, z: best.pos.z };
+              b.lastSeenAt = now;
+              if (b.state !== 'engage') b.state = 'engage';
+            } else {
+              b.lastSeen = { x: best.pos.x, z: best.pos.z };
+              b.lastSeenAt = now;
+            }
           } else if (b.target) {
             // Lost sight: keep the last-seen position for a while.
             b.target = null;
@@ -230,40 +285,100 @@ export function createBots(scene, world, fx) {
             else b.state = 'investigate';
           }
           // Hearing: a recent shot from an enemy gives a last-seen position.
-          for (const n of env.noises) {
-            if (n.team === b.team) continue;
-            const d = Math.hypot(n.x - b.pos.x, n.z - b.pos.z);
-            if (d < BOT.hearRange && now - b.lastSeenAt > 0.5) {
-              b.lastSeen = { x: n.x, z: n.z };
-              b.lastSeenAt = now;
-              if (b.state !== 'engage') b.state = 'investigate';
+          // The carrier never turns off the objective for a sound.
+          if (!b.isCarrier) {
+            for (const n of env.noises) {
+              if (n.team === b.team) continue;
+              const d = Math.hypot(n.x - b.pos.x, n.z - b.pos.z);
+              if (d < BOT.hearRange && now - b.lastSeenAt > 0.5) {
+                b.lastSeen = { x: n.x, z: n.z };
+                b.lastSeenAt = now;
+                if (b.state !== 'engage') b.state = 'investigate';
+              }
             }
           }
         }
+        // The carrier plants the moment he reaches the charge pad, unless
+        // an enemy he can see is close enough to stop him.
+        if (b.isCarrier && env.plantSiteOpen) {
+          const core = CFG.sites[b.planSite].core;
+          const dCore = Math.hypot(core[0] - b.pos.x, core[2] - b.pos.z);
+          const closeThreat = b.target && b.target.alive
+            && Math.hypot(b.target.pos.x - b.pos.x, b.target.pos.z - b.pos.z) < 10;
+          if (dCore < 2.8 && !closeThreat) b.state = 'plant';
+        }
         // --- Role decisions when nothing is in front of us ---
         if (b.state !== 'engage' && !blinded) {
-          if (b.team === 'wardens' && env.plantedSite) {
-            // Retake the planted site.
-            const core = CFG.sites[env.plantedSite].core;
-            const d = Math.hypot(core[0] - b.pos.x, core[2] - b.pos.z);
-            if (d < 2.6) b.state = 'defuse';
-            else if (b.state !== 'retake') { pathTo(b, core[0], core[2]); b.state = 'retake'; }
+          if (env.plantedSite) {
+            if (b.team === 'wardens') {
+              // Retake: the closest living warden defuses, the rest hold
+              // angles around the site and cover him.
+              const core = CFG.sites[env.plantedSite].core;
+              const d = Math.hypot(core[0] - b.pos.x, core[2] - b.pos.z);
+              const mates = bots.filter((o) => o.alive && o.team === 'wardens');
+              const closest = mates.reduce((a, o) => {
+                const od = Math.hypot(core[0] - o.pos.x, core[2] - o.pos.z);
+                const ad = Math.hypot(core[0] - a.pos.x, core[2] - a.pos.z);
+                return od < ad ? o : a;
+              }, b);
+              if (b === closest) {
+                if (d < 2.6) b.state = 'defuse';
+                else if (b.state !== 'retake' || b.pathI >= b.path.length) { pathTo(b, core[0], core[2]); b.state = 'retake'; }
+              } else if (d < 4.5) {
+                b.state = 'hold';
+              } else if (b.state !== 'retake' || b.pathI >= b.path.length) {
+                // Stop short of the pad and hold the angle from cover.
+                const gx = core[0] + (b.pos.x - core[0]) / (d || 1) * 4.5;
+                const gz = core[2] + (b.pos.z - core[2]) / (d || 1) * 4.5;
+                pathTo(b, gx, gz); b.state = 'retake';
+              }
+            } else {
+              // After the plant the breachers hold the site, they do not roam.
+              const spots = world.postPlantSpots[env.plantedSite];
+              if (!b.postPlantSpot) b.postPlantSpot = spots[b.id % spots.length];
+              const s = b.postPlantSpot;
+              const d = Math.hypot(s.x - b.pos.x, s.z - b.pos.z);
+              if (d < 1.5) b.state = 'hold';
+              // Re-path when the path runs out: a path that ends on the
+              // bot's own node must not leave him standing still in 'move'.
+              else if (b.state !== 'move' || b.pathI >= b.path.length) { pathTo(b, s.x, s.z); b.state = 'move'; }
+            }
           } else if (b.team === 'breachers' && b.isCarrier && env.plantSiteOpen) {
             const core = CFG.sites[b.planSite].core;
             const d = Math.hypot(core[0] - b.pos.x, core[2] - b.pos.z);
-            const nearEnemy = env.enemies.some((e) => e.alive && e.team !== b.team && Math.hypot(e.pos.x - b.pos.x, e.pos.z - b.pos.z) < 16);
-            if (d < 2.8 && !nearEnemy) b.state = 'plant';
-            else if (b.state !== 'move' || b.path.length === 0) { pathTo(b, core[0], core[2]); b.state = 'move'; }
+            if (d < 2.8) b.state = 'plant';
+            else if (b.state !== 'move' || b.pathI >= b.path.length) { pathTo(b, core[0], core[2]); b.state = 'move'; }
+            if (!b.planAnnounced && env.roundTime > 0) {
+              b.planAnnounced = true;
+              env.onCallout(`Pushing ${CFG.callouts[b.planSite]} — ${b.name} carries the charge`);
+            }
+          } else if (b.team === 'breachers' && b.isEscort && env.plantSiteOpen) {
+            // The escort stays on the carrier and fights what threatens him.
+            const carrier = bots.find((o) => o.alive && o.team === 'breachers' && o.isCarrier);
+            if (carrier) {
+              const d = Math.hypot(carrier.pos.x - b.pos.x, carrier.pos.z - b.pos.z);
+              if (d > BOT.escortRange && (b.state !== 'move' || b.pathI >= b.path.length)) {
+                pathTo(b, carrier.pos.x, carrier.pos.z); b.state = 'move';
+              } else if (d <= BOT.escortRange) {
+                b.state = 'hold';
+                b.yaw = yawTo(b.pos.x, b.pos.z, carrier.pos.x, carrier.pos.z);
+              }
+            } else if (b.state !== 'move' || b.pathI >= b.path.length) {
+              const core = CFG.sites[b.planSite].core;
+              pathTo(b, core[0], core[2]); b.state = 'move';
+            }
           } else if (b.team === 'breachers' && b.state === 'move') {
             // Push toward the planned site; hold the angle once there.
             const core = CFG.sites[b.planSite].core;
-            if (b.path.length === 0) pathTo(b, core[0], core[2]);
-            else if (b.pathI >= b.path.length) b.state = 'hold';
+            const dc = Math.hypot(core[0] - b.pos.x, core[2] - b.pos.z);
+            if (dc < 2.5) b.state = 'hold';
+            else if (b.path.length === 0 || b.pathI >= b.path.length) pathTo(b, core[0], core[2]);
           } else if (b.team === 'wardens' && b.state === 'move') {
             // Walk to the assigned hold spot, then sit on it and scan.
             const spot = b.holdSpot || { x: 0, z: 12 };
-            if (b.path.length === 0) pathTo(b, spot.x, spot.z);
-            else if (b.pathI >= b.path.length) b.state = 'hold';
+            const ds = Math.hypot(spot.x - b.pos.x, spot.z - b.pos.z);
+            if (ds < 1.5) b.state = 'hold';
+            else if (b.path.length === 0 || b.pathI >= b.path.length) pathTo(b, spot.x, spot.z);
           } else if (b.state === 'investigate' && b.lastSeen) {
             const d = Math.hypot(b.lastSeen.x - b.pos.x, b.lastSeen.z - b.pos.z);
             if (d < 1.5 || now - b.lastSeenAt > BOT.memorySeconds) {
@@ -283,10 +398,32 @@ export function createBots(scene, world, fx) {
             env.throwGrenade('smoke', { x: b.pos.x, y: b.pos.y + 1.4, z: b.pos.z }, { x: entry[0], y: 1, z: entry[1] }, b.team);
           }
         }
+        // Breacher flash: before entering a chokepoint, flash the entry —
+        // but never with a teammate standing in the blast, and never more
+        // often than the cooldown allows. The push follows right after.
+        if (b.team === 'breachers' && !env.plantedSite && now >= b.flashReadyAt && b.state === 'move') {
+          const entry = b.planSite === 'A' ? [-20, -8] : [20, -8];
+          const d = Math.hypot(entry[0] - b.pos.x, entry[1] - b.pos.z);
+          if (d < BOT.flashEntryRange && d > 2) {
+            const mateNear = bots.some((o) => o.alive && o.team === b.team && o !== b
+              && Math.hypot(entry[0] - o.pos.x, entry[1] - o.pos.z) < 6);
+            if (!mateNear) {
+              b.flashReadyAt = now + BOT.flashCooldown;
+              b.flashThrown = true;
+              env.throwGrenade('flash', { x: b.pos.x, y: b.pos.y + 1.4, z: b.pos.z }, { x: entry[0], y: 1.6, z: entry[1] }, b.team);
+              env.onCallout(`Flashing ${CFG.callouts[b.planSite]} entry`);
+            }
+          }
+        }
       }
 
       // --- Movement ---
-      if (blinded) {
+      const averting = now < b.avertUntil;
+      if (averting) {
+        // A teammate called a flash: stand still, facing away from the pop,
+        // until it goes off. Nobody on the push blinds himself.
+        b.yaw = b.avertYaw;
+      } else if (blinded) {
         // Blinded bots shuffle slowly and never shoot.
         b.yaw += dt * 0.8;
         moveCapsule(b.pos, Math.sin(b.yaw) * 0.8 * dt, Math.cos(b.yaw) * 0.8 * dt, 0.34, 1.75, boxes);
@@ -298,7 +435,7 @@ export function createBots(scene, world, fx) {
         const sx = Math.cos(tyaw) * b.strafeDir * 2.1, sz = -Math.sin(tyaw) * b.strafeDir * 2.1;
         moveCapsule(b.pos, sx * dt, sz * dt, 0.34, 1.75, boxes);
       } else if (b.state === 'move' || b.state === 'retake' || b.state === 'investigate') {
-        moveAlongPath(b, dt, BOT.moveSpeed);
+        moveAlongPath(b, dt, BOT.moveSpeed, now);
       } else if (b.state === 'hold') {
         // Scan: slow yaw sweep across the lane.
         b.yaw += Math.sin(now * 0.5 + b.id) * dt * 0.35;
@@ -324,7 +461,8 @@ export function createBots(scene, world, fx) {
       }
 
       // --- Shooting: bursts with pauses, only after the reaction time ---
-      if (b.state === 'engage' && b.target && b.target.alive && now >= b.reactAt && !blinded) {
+      // Averting bots hold their fire: they are facing away from the flash.
+      if (b.state === 'engage' && b.target && b.target.alive && now >= b.reactAt && !blinded && !averting) {
         if (b.burstLeft <= 0 && now >= b.burstPauseUntil) {
           b.burstLeft = BOT.burstMin + Math.floor(Math.random() * (BOT.burstMax - BOT.burstMin + 1));
           b.nextShot = now;
@@ -340,6 +478,11 @@ export function createBots(scene, world, fx) {
       // --- Sync the visual group ---
       b.group.position.set(b.pos.x, b.pos.y, b.pos.z);
       b.group.rotation.y = b.yaw;
+      // Map bounds: the capsule slide can eject a bot to the wrong side of
+      // a thin wall at a corner; the clamp pulls him back inside at once
+      // instead of leaving him lost outside the map.
+      b.pos.x = clamp(b.pos.x, -CFG.map.halfW + 0.6, CFG.map.halfW - 0.6);
+      b.pos.z = clamp(b.pos.z, -CFG.map.halfD + 0.6, CFG.map.halfD - 0.6);
       // Walk cycle: legs swing; standing still they settle.
       const moving = b.state === 'move' || b.state === 'retake' || b.state === 'investigate';
       const swing = moving ? Math.sin(b.walkPhase) * 0.4 : 0;
@@ -361,12 +504,34 @@ export function createBots(scene, world, fx) {
       bot.group.rotation.x = -Math.PI / 2;
       bot.group.position.y = 0.25;
       bot.disc.visible = false;
+      // The charge never dies with its carrier: the next living breacher
+      // picks it up at once and the team is told.
+      if (bot.isCarrier) {
+        bot.isCarrier = false;
+        const next = bots.find((o) => o.alive && o.team === 'breachers' && o !== bot);
+        if (next) {
+          next.isCarrier = true;
+          next.planSite = bot.planSite;
+          carrierDropName = next.name;
+        } else {
+          carrierDropName = null;
+        }
+      }
       return true;
     }
     return false;
   }
 
   function aliveCount(team) { return bots.filter((b) => b.alive && b.team === team).length; }
+
+  // The name of the bot who picked up a dropped charge, if one died since
+  // the last read; main.js turns it into a callout. Null clears the flag.
+  let carrierDropName = null;
+  function takeCarrierDrop() {
+    const name = carrierDropName;
+    carrierDropName = null;
+    return name;
+  }
 
   function reset() {
     for (const b of bots) {
@@ -376,5 +541,5 @@ export function createBots(scene, world, fx) {
     }
   }
 
-  return { bots, descriptor, spawnRound, step, damage, aliveCount, reset };
+  return { bots, descriptor, spawnRound, step, damage, aliveCount, reset, takeCarrierDrop };
 }

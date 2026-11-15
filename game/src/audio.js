@@ -90,6 +90,7 @@ export function createAudio() {
       noise(0.5, 'bandpass', 900, 0.5, 0.05);
     },
     roundWin() { if (ensure()) { tone(523, 0.14, 'sine', 0.22); tone(659, 0.14, 'sine', 0.22, 0, 0.13); tone(784, 0.24, 'sine', 0.24, 0, 0.26); } },
+    callout() { if (ensure()) { tone(1050, 0.05, 'square', 0.1); tone(1050, 0.05, 'square', 0.1, 0, 0.09); } },
     roundLose() { if (ensure()) { tone(392, 0.16, 'sine', 0.2); tone(311, 0.16, 'sine', 0.2, 0, 0.15); tone(233, 0.3, 'sine', 0.22, 0, 0.3); } },
     buy() { if (ensure()) { tone(980, 0.05, 'sine', 0.16); tone(1470, 0.07, 'sine', 0.16, 0, 0.05); } },
     denied() { if (ensure()) tone(180, 0.12, 'square', 0.16); },

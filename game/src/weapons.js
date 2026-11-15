@@ -57,10 +57,18 @@ export function createGrenadePool(scene) {
 
 export function createWeapons(camera, scene, fx, grenades) {
   // The viewmodel: boxes only, parented to the camera so it never clips.
+  // A conventional rifle silhouette — receiver, barrel, iron sights front
+  // and rear, magazine, pistol grip, foregrip and stock — mid-grey matte
+  // metal with a polymer grip, no glow, no ornament. The metal is light
+  // enough to read against the bright ground, and a small fill light
+  // parented to the camera keeps it from going black in shadow.
   const vm = new THREE.Group();
-  const gunMat = new THREE.MeshStandardMaterial({ color: 0x2a2d33, roughness: 0.45, metalness: 0.75 });
-  const gripMat = new THREE.MeshStandardMaterial({ color: 0x1a1c20, roughness: 0.8, metalness: 0.2 });
-  const accentMat = new THREE.MeshStandardMaterial({ color: 0x8a6a2a, roughness: 0.5, metalness: 0.6 });
+  const gunMat = new THREE.MeshStandardMaterial({ color: 0x4a4e55, roughness: 0.45, metalness: 0.75 });
+  const gripMat = new THREE.MeshStandardMaterial({ color: 0x33363c, roughness: 0.8, metalness: 0.2 });
+  const sightMat = new THREE.MeshStandardMaterial({ color: 0x2a2c30, roughness: 0.4, metalness: 0.8 });
+  const vmLight = new THREE.PointLight(0xfff2dd, 1.6, 2.5, 1.5);
+  vmLight.position.set(0.2, 0.1, -0.2);
+  camera.add(vmLight);
   const body = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.11, 0.62), gunMat);
   const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.022, 0.3, 8), gunMat);
   barrel.rotation.x = Math.PI / 2; barrel.position.set(0, 0.02, -0.42);
@@ -68,13 +76,19 @@ export function createWeapons(camera, scene, fx, grenades) {
   grip.position.set(0, -0.11, 0.16); grip.rotation.x = 0.35;
   const mag = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.16, 0.08), gripMat);
   mag.position.set(0, -0.12, -0.05); mag.rotation.x = -0.12;
-  const sight = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.05, 0.1), accentMat);
-  sight.position.set(0, 0.08, -0.1);
+  const foreGrip = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.12, 0.07), gripMat);
+  foreGrip.position.set(0, -0.1, -0.24); foreGrip.rotation.x = 0.15;
+  const stock = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.09, 0.16), gripMat);
+  stock.position.set(0, -0.01, 0.36);
+  const rearSight = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.04, 0.03), sightMat);
+  rearSight.position.set(0, 0.075, 0.12);
+  const frontSight = new THREE.Mesh(new THREE.BoxGeometry(0.015, 0.05, 0.015), sightMat);
+  frontSight.position.set(0, 0.08, -0.34);
   const flashQuad = new THREE.Mesh(new THREE.PlaneGeometry(0.15, 0.15),
     new THREE.MeshBasicMaterial({ color: 0xffd27a, transparent: true, opacity: 0, side: THREE.DoubleSide, depthWrite: false }));
   flashQuad.position.set(0, 0.02, -0.6);
-  vm.add(body, barrel, grip, mag, sight, flashQuad);
-  vm.position.set(0.26, -0.24, -0.5);
+  vm.add(body, barrel, grip, mag, foreGrip, stock, rearSight, frontSight, flashQuad);
+  vm.position.set(0.24, -0.26, -0.5);
   camera.add(vm);
 
   const state = {
@@ -155,8 +169,8 @@ export function createWeapons(camera, scene, fx, grenades) {
     const bob = Math.min(1, moveSpeed / 6) * 0.012;
     const reloadDip = state.reloading ? Math.sin(((now - (state.reloadEnd - def().reload)) / def().reload) * Math.PI) * 0.16 : 0;
     vm.position.set(
-      0.26 + Math.sin(state.bobPhase * 2) * bob,
-      -0.24 + Math.abs(Math.cos(state.bobPhase * 2)) * bob - reloadDip,
+      0.24 + Math.sin(state.bobPhase * 2) * bob,
+      -0.26 + Math.abs(Math.cos(state.bobPhase * 2)) * bob - reloadDip,
       -0.5 + state.kick * 0.09,
     );
     vm.rotation.x = state.kick * 0.16 + (state.reloading ? -0.5 * Math.sin(((now - (state.reloadEnd - def().reload)) / def().reload) * Math.PI) : 0);

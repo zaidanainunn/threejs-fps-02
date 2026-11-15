@@ -43,7 +43,7 @@ export function createHud(onBuy) {
     el.money.textContent = `$${m.toLocaleString('en-US')}`;
   }
   function setTimer(seconds, planted, fuse) {
-    const text = planted ? `CORE ${Math.ceil(fuse)}s` : fmtTime(seconds);
+    const text = planted ? `CHARGE ${Math.ceil(fuse)}s` : fmtTime(seconds);
     if (text === last.timer) return;
     last.timer = text;
     el.timer.textContent = text;
@@ -108,9 +108,21 @@ export function createHud(onBuy) {
     while (el.feed.children.length > 5) el.feed.lastChild.remove();
     setTimeout(() => row.remove(), 6000);
   }
+  // Factual callouts from real events: the push, a dropped charge, a
+  // plant, a defuse. Short, and gone in a few seconds.
+  function callout(text) {
+    const box = $('callouts');
+    if (!box) return;
+    const row = document.createElement('div');
+    row.className = 'callout-row';
+    row.textContent = text;
+    box.prepend(row);
+    while (box.children.length > 3) box.lastChild.remove();
+    setTimeout(() => row.remove(), 5000);
+  }
 
   // --- Buy menu ---
-  function renderBuy(money, owned, grenades, armor, helmet, kit, team) {
+  function renderBuy(money, owned, grenades, armor, helmet, kit, team, lossStreak = 0) {
     const rows = [];
     for (const id of WEAPON_ORDER) {
       const w = WEAPONS[id];
@@ -137,6 +149,13 @@ export function createHud(onBuy) {
     });
     el.buy.querySelector('.buy-money').textContent = `$${money.toLocaleString('en-US')}`;
     el.buy.querySelector('.buy-grenades').textContent = `Smoke ×${grenades.smoke} · Flash ×${grenades.flash}`;
+    const streak = el.buy.querySelector('.buy-streak');
+    if (streak) {
+      const next = CFG.money.lossStreak[Math.min(lossStreak, CFG.money.lossStreak.length - 1)];
+      streak.textContent = lossStreak > 0
+        ? `Loss streak ${lossStreak} — lose again for $${next.toLocaleString('en-US')}: save, or force a buy?`
+        : 'Win pays $3,250 · a loss pays $1,900, more on a streak';
+    }
   }
   function showBuy(show) { el.buy.hidden = !show; }
   function buyVisible() { return !el.buy.hidden; }
@@ -154,9 +173,9 @@ export function createHud(onBuy) {
     el.overlay.hidden = false;
     if (kind === 'start') {
       el.overlayTitle.textContent = 'OPERATION ZERO';
-      el.overlayCopy.innerHTML = `A tactical round-based FPS in the Industrial Zone.<br>
-        <b class="cyan">Wardens</b> defend the Pulse Cores. <b class="amber">Breachers</b> plant them.<br>
-        First to 8 rounds takes the match. Buy between rounds, hold angles, stop to aim.`;
+      el.overlayCopy.innerHTML = `A tactical round-based FPS in Blackwater Foundry.<br>
+        <b class="cyan">Wardens</b> defend the sites. <b class="amber">Breachers</b> plant the Demolition Charge.<br>
+        First to 8 rounds takes the match — sides switch after round 7. Buy between rounds, hold angles, stop to aim.`;
       el.playBtn.textContent = 'Click to deploy';
     } else if (kind === 'paused') {
       el.overlayTitle.textContent = 'PAUSED';
@@ -177,7 +196,7 @@ export function createHud(onBuy) {
 
   return {
     setHealth, setAmmo, setMoney, setTimer, setScore, setObjective, setCrosshair,
-    hitMarker, damageFlash, flashWhite, showProgress, hideProgress, banner, killFeed,
+    hitMarker, damageFlash, flashWhite, showProgress, hideProgress, banner, killFeed, callout,
     renderBuy, showBuy, buyVisible, showScoreboard, hideScoreboard,
     showOverlay, hideOverlay, overlayVisible, hideBanner,
     onPlay(cb) { el.playBtn.addEventListener('click', cb); },

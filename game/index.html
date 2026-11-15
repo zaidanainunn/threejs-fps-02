@@ -1,16 +1,20 @@
 <!doctype html>
-<!-- OPERATION ZERO — a round-based tactical FPS in the Industrial Zone.
+<!-- OPERATION ZERO — a round-based tactical FPS in Blackwater Foundry.
      For the judge: this is the whole game in one page. Two teams — the
-     Wardens defend the two Pulse Cores, the Breachers plant them. Rounds
-     are won by elimination, detonation or defusal; money earned each round
-     buys weapons and gear in the buy menu (B). Bots navigate a waypoint
-     graph, see through a vision cone and line of sight, hear gunshots,
-     hold sites, push lanes, throw smoke and plant/defuse the core.
-     Everything runs from these static files: no build step, no network.
-     Screens: src/main.js drives the loop; src/world.js builds the map;
-     src/bot.js is the bot AI; src/match.js is the round and economy flow;
-     src/weapons.js holds the guns and grenades; src/combat.js resolves
-     every hitscan shot against bodies (headshots pay more) and the map. -->
+     Wardens defend the two charge sites (Foundry and Silos), the Breachers
+     plant the Demolition Charge. Rounds are won by elimination, detonation
+     or defusal; money earned each round buys weapons and gear in the buy
+     menu (B), and losing pays more on a streak, so saving is a real choice.
+     Bots navigate a waypoint graph, see through a vision cone and line of
+     sight, hear gunshots, hold sites, push lanes, flash entries, throw
+     smoke and plant/defuse the charge. The carrier commits to his site
+     with an escort; after a plant the attackers hold and the defenders
+     retake. Everything runs from these static files: no build step, no
+     network. Screens: src/main.js drives the loop; src/world.js builds
+     the map; src/bot.js is the bot AI; src/match.js is the round and
+     economy flow; src/weapons.js holds the guns and grenades; src/combat.js
+     resolves every hitscan shot against bodies (headshots pay more) and
+     the map. -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -18,9 +22,9 @@
 <title>OPERATION ZERO — Tactical FPS</title>
 <style>
   :root {
-    --canvas: #1c1626; --surface: #221c2e; --hairline: #3a3049;
-    --ink: #e9e6df; --muted: #a49ab5; --accent: #ff9a3c;
-    --cyan: #35c8ff; --amber: #ff9a3c; --danger: #ff4a3c;
+    --canvas: #2e2a24; --surface: #3a352d; --hairline: #57503f;
+    --ink: #f2ede2; --muted: #b0a894; --accent: #d8a018;
+    --cyan: #7fb3d5; --amber: #e8b820; --danger: #ff4a3c;
     --font-ui: system-ui, -apple-system, 'Segoe UI', sans-serif;
     --font-readout: ui-monospace, 'SF Mono', Menlo, monospace;
   }
@@ -64,7 +68,7 @@
   #money { font-size: 18px; color: var(--accent); margin-top: 4px; }
 
   /* Top-centre: timer, score, round, objective. */
-  #topbar { position: fixed; top: 18px; left: 50%; transform: translateX(-50%); text-align: center; font-family: var(--font-readout); }
+  #topbar { position: fixed; top: 18px; left: 50%; transform: translateX(-50%); text-align: center; font-family: var(--font-readout); text-shadow: 0 1px 3px rgba(0,0,0,.7), 0 0 10px rgba(0,0,0,.45); }
   #timer { font-size: 30px; }
   #timer.danger { color: var(--danger); }
   #score-line { font-size: 15px; margin-top: 2px; }
@@ -78,6 +82,10 @@
   .feed-row { background: rgba(20,16,30,.72); padding: 3px 8px; border-radius: 3px; }
   .feed-row .wardens { color: var(--cyan); } .feed-row .breachers { color: var(--amber); }
   .feed-row i { margin: 0 6px; color: var(--muted); font-style: normal; }
+
+  /* Factual callouts (push, carrier down, plant, defuse), top-left. */
+  #callouts { position: fixed; top: 18px; left: 24px; display: flex; flex-direction: column; gap: 4px; font-size: 13px; font-family: var(--font-readout); }
+  .callout-row { background: rgba(40,36,28,.78); padding: 3px 8px; border-radius: 3px; border-left: 3px solid var(--accent); }
 
   /* Damage vignette, flash and the direction arc. */
   #vignette { position: fixed; inset: 0; pointer-events: none; opacity: 0; transition: opacity 300ms;
@@ -99,12 +107,13 @@
 
   /* Buy menu. */
   #buy-menu { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%); width: min(560px, 94vw);
-    background: rgba(28,22,38,.94); border: 1px solid var(--hairline); border-radius: 8px; padding: 20px 22px; pointer-events: auto; z-index: 8; }
+    background: rgba(46,42,36,.95); border: 1px solid var(--hairline); border-radius: 8px; padding: 20px 22px; pointer-events: auto; z-index: 8; }
   #buy-menu h2 { margin: 0 0 4px; font-size: 20px; letter-spacing: .04em; }
   #buy-menu .buy-sub { color: var(--muted); font-size: 13px; margin-bottom: 12px; display: flex; justify-content: space-between; }
+  #buy-menu .buy-streak { color: var(--accent); font-size: 12px; margin-bottom: 12px; letter-spacing: .02em; }
   #buy-list { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   #buy-list button { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 9px 11px;
-    background: #2a2338; color: var(--ink); border: 1px solid var(--hairline); border-radius: 6px; cursor: pointer; font: inherit; text-align: left; }
+    background: #454033; color: var(--ink); border: 1px solid var(--hairline); border-radius: 6px; cursor: pointer; font: inherit; text-align: left; }
   #buy-list button:hover:not(:disabled) { border-color: var(--accent); }
   #buy-list button:disabled { opacity: .45; cursor: default; }
   #buy-list button.poor { opacity: .55; }
@@ -114,7 +123,7 @@
 
   /* Scoreboard. */
   #scoreboard { position: fixed; left: 50%; top: 16%; transform: translateX(-50%); width: min(420px, 92vw);
-    background: rgba(28,22,38,.94); border: 1px solid var(--hairline); border-radius: 8px; padding: 16px 18px; z-index: 8; }
+    background: rgba(46,42,36,.95); border: 1px solid var(--hairline); border-radius: 8px; padding: 16px 18px; z-index: 8; }
   #scoreboard h3 { margin: 0 0 10px; font-size: 15px; letter-spacing: .14em; }
   #scoreboard table { width: 100%; border-collapse: collapse; font-size: 13px; font-family: var(--font-readout); }
   #scoreboard td, #scoreboard th { padding: 4px 6px; text-align: left; }
@@ -125,7 +134,7 @@
 
   /* Start / pause / end overlay. */
   .overlay { position: fixed; inset: 0; display: grid; place-items: center; padding: 24px; z-index: 10;
-    background: rgba(20,15,30,.82); }
+    background: rgba(30,28,24,.82); }
   .overlay[hidden] { display: none; }
   .panel { width: min(480px, 100%); padding: 32px; background: var(--surface); border: 1px solid var(--hairline); border-radius: 8px; }
   .panel h1 { margin: 0 0 8px; font-size: 34px; letter-spacing: .02em; }
@@ -133,7 +142,7 @@
   .panel p { margin: 0 0 24px; font-size: 15px; line-height: 1.55; color: var(--muted); }
   .panel p b.cyan { color: var(--cyan); } .panel p b.amber { color: var(--amber); }
   #play { font: inherit; font-weight: 600; padding: 12px 18px; border: 1px solid var(--accent); border-radius: 8px;
-    background: var(--accent); color: #1c1626; cursor: pointer; }
+    background: var(--accent); color: #2e2a24; cursor: pointer; }
   #play:hover { background: var(--ink); border-color: var(--ink); }
   .keys { margin: 22px 0 0; padding: 0; list-style: none; display: grid; grid-template-columns: 1fr 1fr; gap: 7px; font-size: 13px; color: var(--muted); }
   .keys li { display: flex; align-items: center; gap: 6px; }
@@ -152,10 +161,11 @@
     <div id="timer">1:40</div>
     <div id="score-line"><span class="cyan">WARDENS <b id="score-w">0</b></span> — <span class="amber"><b id="score-b">0</b> BREACHERS</span></div>
     <div id="round">ROUND 1</div>
-    <div id="objective">Defend the Pulse Cores</div>
+    <div id="objective">Defend the charge sites — Foundry &amp; Silos</div>
     <div id="team-tag" class="wardens">WARDENS — DEFEND</div>
   </div>
 
+  <div id="callouts"></div>
   <div id="killfeed"></div>
 
   <div id="health">
@@ -183,6 +193,7 @@
   <div id="buy-menu" hidden>
     <h2>BUY PHASE</h2>
     <div class="buy-sub"><span class="buy-money">$800</span><span class="buy-grenades"></span><span>Keys 1–8 or click · B to close</span></div>
+    <div class="buy-streak"></div>
     <div id="buy-list"></div>
   </div>
 
@@ -195,9 +206,9 @@
 <div id="overlay" class="overlay">
   <section class="panel" role="dialog" aria-modal="true" aria-labelledby="overlay-title">
     <h1 id="overlay-title">OPERATION <span class="zero">ZERO</span></h1>
-    <p id="overlay-copy">A tactical round-based FPS in the Industrial Zone.<br>
-      <b class="cyan">Wardens</b> defend the Pulse Cores. <b class="amber">Breachers</b> plant them.<br>
-      First to 8 rounds takes the match. Buy between rounds, hold angles, stop to aim.</p>
+    <p id="overlay-copy">A tactical round-based FPS in Blackwater Foundry.<br>
+      <b class="cyan">Wardens</b> defend the sites. <b class="amber">Breachers</b> plant the Demolition Charge.<br>
+      First to 8 rounds takes the match — sides switch after round 7. Buy between rounds, hold angles, stop to aim.</p>
     <button id="play" type="button">Click to deploy</button>
     <ul class="keys">
       <li><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> Move</li>

@@ -1,8 +1,9 @@
 // OPERATION ZERO — shared tuning: teams, weapons, economy, round flow.
 // One place for every number the other modules read; nothing here touches the DOM.
 export const CFG = {
-  // Map bounds (metres). The Industrial Zone is 76 wide (x) by 56 deep (z).
-  map: { halfW: 38, halfD: 28, wallH: 6 },
+  // Map bounds (metres). Blackwater Foundry is 76 wide (x) by 56 deep (z):
+  // Site A the brick foundry, Site B the pale silos, mid the container yard.
+  map: { halfW: 38, halfD: 28, wallH: 6, name: 'Blackwater Foundry' },
   eye: 1.62, // camera height above the feet
   playerRadius: 0.42,
   playerHeight: 1.75,
@@ -15,9 +16,11 @@ export const CFG = {
   airAccel: 9,
   friction: 11,
   // Rounds: buy phase, combat timer, first to N, sides switch after this round.
-  round: { buySeconds: 15, combatSeconds: 100, winScore: 8, switchAfter: 4, plantSeconds: 3.5, defuseSeconds: 5, defuseKitSeconds: 2.5, coreFuseSeconds: 40 },
+  round: { buySeconds: 15, combatSeconds: 100, winScore: 8, switchAfter: 7, plantSeconds: 3.5, defuseSeconds: 5, defuseKitSeconds: 2.5, coreFuseSeconds: 40 },
   // Economy (dollars). Kill/plant/defuse bonuses stack on the round payout.
-  money: { start: 800, win: 3250, loss: 1900, kill: 300, plant: 300, defuse: 300, max: 16000 },
+  // Losing pays more the longer the streak runs, so saving a round is a
+  // real choice against forcing a buy: 1900, then 2400, 2900, 3400.
+  money: { start: 800, win: 3250, loss: 1900, lossStreak: [1900, 2400, 2900, 3400], kill: 300, plant: 300, defuse: 300, max: 16000 },
   teams: {
     wardens: { name: 'Wardens', color: 0x35c8ff, dark: 0x1d7fb8, label: 'WARDENS' },
     breachers: { name: 'Breachers', color: 0xff9a3c, dark: 0xc96a12, label: 'BREACHERS' },
@@ -26,6 +29,8 @@ export const CFG = {
     A: { id: 'A', name: 'Site A — Foundry', core: [-27, 0, -8] },
     B: { id: 'B', name: 'Site B — Silos', core: [27, 0, -8] },
   },
+  // Callouts the map is known by: Foundry, Silos, Yard, A Long, B Short.
+  callouts: { A: 'Foundry', B: 'Silos', mid: 'Yard' },
 };
 
 // Weapons: damage is per body hit at close range; headshots multiply by headMult.
@@ -82,4 +87,8 @@ export const BOT = {
   thinkEvery: 0.15, // perception tick, staggered per bot
   memorySeconds: 4, // how long a last-seen position stays worth investigating
   smokeAtSeconds: 18, // breachers throw their smoke this far into the round
+  flashCooldown: 25, // seconds between one bot's flashes
+  flashEntryRange: 14, // a breacher flashes when this close to a site entry
+  carrierEngageRange: 14, // the carrier only stops to fight inside this range
+  escortRange: 7, // the escort stays within this of the carrier
 };

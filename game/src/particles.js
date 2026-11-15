@@ -29,6 +29,12 @@ export function createFx(scene) {
     t.line.material.color.setHex(color);
   }
 
+  // Hide every tracer instantly (used by the staged screenshot poses so
+  // no shot fired during the settle is still visible in the frame).
+  function clearTracers() {
+    for (const t of tracers) { t.line.visible = false; t.life = 0; }
+  }
+
   // --- Impact sparks: one Points cloud, 240 particles, ring-buffered ---
   const SPARKS = 240;
   const sparkGeo = new THREE.BufferGeometry();
@@ -122,5 +128,5 @@ export function createFx(scene) {
     }
   }
 
-  return { tracer, burst, muzzle, addSmoke, smokeList, flashBurst, step };
+  return { tracer, burst, muzzle, addSmoke, smokeList, flashBurst, step, clearTracers };
 }
